@@ -1,0 +1,20 @@
+{
+  "adbPath": "adb.exe",
+  "deviceSerial": "",
+  "shopeePackage": "com.shopee.vn",
+  "shopeeDomain": "shopee.vn",
+  "collectorPort": 5050,
+  "mitmproxyPort": 8080,
+  "downloadsFolder": "Downloads",
+  "scrollCount": 25,
+  "scrollDelayMs": 2000,
+  "appLaunchDelayMs": 3000,
+  "pageLoadDelayMs": 2500,
+  "coordinates": {
+    "searchButton":      { "x": 540, "y": 80  },
+    "firstSearchResult": { "x": 540, "y": 350 },
+    "videoTab":          { "x": 540, "y": 280 },
+    "scrollFrom":        { "x": 540, "y": 1600 },
+    "scrollTo":          { "x": 540, "y": 600  }
+  }
+}

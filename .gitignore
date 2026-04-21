@@ -1,0 +1,27 @@
+# .NET build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# Downloads (captured videos — never commit)
+Downloads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# mitmproxy
+.mitmproxy/
+
+# IDE
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store
