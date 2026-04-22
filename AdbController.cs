@@ -15,10 +15,11 @@ public class AdbController
     private readonly string _deviceSerial;
 
     // Android keycodes
-    public const int KEYCODE_BACK = 4;
-    public const int KEYCODE_HOME = 3;
+    public const int KEYCODE_BACK  = 4;
+    public const int KEYCODE_HOME  = 3;
     public const int KEYCODE_ENTER = 66;
-    public const int KEYCODE_DEL = 67;
+    public const int KEYCODE_DEL   = 67;
+    public const int KEYCODE_PASTE = 279;
 
     public AdbController(string adbPath, string deviceSerial = "")
     {
@@ -150,6 +151,42 @@ public class AdbController
 
         try { return XDocument.Parse(xml); }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Finds the centre coordinates of the first editable text field (EditText)
+    /// on screen. Used to explicitly focus the input before typing.
+    /// Returns null if no input field is found.
+    /// </summary>
+    public async Task<(int X, int Y)?> FindInputFieldAsync()
+    {
+        var doc = await DumpUiAsync();
+        if (doc == null) return null;
+
+        foreach (var node in doc.Descendants("node"))
+        {
+            string cls       = node.Attribute("class")?.Value       ?? "";
+            string focusable = node.Attribute("focusable")?.Value   ?? "";
+            string enabled   = node.Attribute("enabled")?.Value     ?? "";
+            string bounds    = node.Attribute("bounds")?.Value      ?? "";
+
+            bool isInput = cls.Contains("EditText", StringComparison.OrdinalIgnoreCase)
+                        || (focusable == "true" && enabled == "true"
+                            && cls.Contains("Text", StringComparison.OrdinalIgnoreCase));
+
+            if (isInput && !string.IsNullOrEmpty(bounds))
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(
+                    bounds, @"\[(\d+),(\d+)\]\[(\d+),(\d+)\]");
+                if (m.Success)
+                {
+                    int cx = (int.Parse(m.Groups[1].Value) + int.Parse(m.Groups[3].Value)) / 2;
+                    int cy = (int.Parse(m.Groups[2].Value) + int.Parse(m.Groups[4].Value)) / 2;
+                    return (cx, cy);
+                }
+            }
+        }
+        return null;
     }
 
     /// <summary>

@@ -26,13 +26,14 @@ public class ShopeeNavigator
     {
         Console.WriteLine($"[NAV] Launching Shopee ({_cfg.ShopeePackage})…");
         await _adb.ForceStopAppAsync(_cfg.ShopeePackage);
-        await Task.Delay(800);
+        await Task.Delay(1000);
         await _adb.LaunchAppAsync(_cfg.ShopeePackage);
+
+        // Wait for the home screen to fully render before interacting.
+        Console.WriteLine($"[NAV] Waiting {_cfg.AppLaunchDelayMs} ms for Shopee to load…");
         await Task.Delay(_cfg.AppLaunchDelayMs);
 
-        bool deepLinkWorked = await TryDeepLinkAsync(kolNickname);
-        if (!deepLinkWorked)
-            await SearchForKolAsync(kolNickname);
+        await SearchForKolAsync(kolNickname);
 
         await Task.Delay(_cfg.PageLoadDelayMs);
         await NavigateToVideoTabAsync();
@@ -131,63 +132,100 @@ public class ShopeeNavigator
     }
 
     /// <summary>
-    /// Attempts to jump directly to the KOL's profile via an Android deep link.
-    /// </summary>
-    private async Task<bool> TryDeepLinkAsync(string kolNickname)
-    {
-        string[] deepLinks =
-        {
-            $"shopee://profile/{Uri.EscapeDataString(kolNickname)}",
-            $"https://{_cfg.ShopeeDomain}/{Uri.EscapeDataString(kolNickname)}"
-        };
-
-        foreach (string link in deepLinks)
-        {
-            Console.WriteLine($"[NAV] Trying deep link: {link}");
-            await _adb.OpenUrlAsync(link);
-            await Task.Delay(_cfg.PageLoadDelayMs);
-
-            var center = await _adb.FindElementCenterAsync("Video", partial: true);
-            if (center != null)
-            {
-                Console.WriteLine("[NAV] Deep link succeeded.");
-                return true;
-            }
-        }
-
-        Console.WriteLine("[NAV] Deep link did not land on profile. Falling back to search.");
-        return false;
-    }
-
-    /// <summary>
     /// Navigates via Shopee's search UI to find the KOL and open their profile.
     /// </summary>
     private async Task SearchForKolAsync(string kolNickname)
     {
-        Console.WriteLine("[NAV] Opening search via UI…");
+        Console.WriteLine("[NAV] Opening search bar…");
         var coords = _cfg.Coordinates;
 
-        bool tappedSearch = await _adb.TapElementAsync("Search", partial: true);
+        // Shopee VN shows a search bar/button with various labels depending on the version.
+        // Try UIAutomator first (most reliable), fall back to coordinates.
+        string[] searchLabels =
+        {
+            "Tìm kiếm", "Tìm kiếm sản phẩm", "Tìm trong Shopee",
+            "Search", "Search products", "Cari"
+        };
+
+        bool tappedSearch = false;
+        // Retry up to 3 times — Shopee may still be loading on first attempt.
+        for (int attempt = 0; attempt < 3 && !tappedSearch; attempt++)
+        {
+            foreach (string label in searchLabels)
+            {
+                tappedSearch = await _adb.TapElementAsync(label, partial: true);
+                if (tappedSearch)
+                {
+                    Console.WriteLine($"[NAV] Search bar found via UIAutomator ('{label}').");
+                    break;
+                }
+            }
+
+            if (!tappedSearch)
+            {
+                Console.WriteLine($"[NAV] Search bar not found via UIAutomator (attempt {attempt + 1}/3) — waiting…");
+                await Task.Delay(1500);
+            }
+        }
+
         if (!tappedSearch)
+        {
+            Console.WriteLine("[NAV] Falling back to configured search-bar coordinates.");
             await _adb.TapAsync(coords.SearchButton.X, coords.SearchButton.Y);
+        }
+
+        // Give Shopee time to open the search overlay and display the keyboard.
+        await Task.Delay(1500);
+
+        // Explicitly locate the EditText field and tap it to guarantee keyboard focus.
+        var inputCenter = await _adb.FindInputFieldAsync();
+        if (inputCenter != null)
+        {
+            Console.WriteLine($"[NAV] Focusing input field at ({inputCenter.Value.X}, {inputCenter.Value.Y}).");
+            await _adb.TapAsync(inputCenter.Value.X, inputCenter.Value.Y);
+        }
+        else
+        {
+            Console.WriteLine("[NAV] WARN: EditText not found in UI dump — typing anyway.");
+        }
         await Task.Delay(600);
 
+        // Type the KOL's nickname into the focused field.
+        Console.WriteLine($"[NAV] Typing '{kolNickname}'…");
         await _adb.TypeTextAsync(kolNickname);
-        await Task.Delay(400);
+        await Task.Delay(500);
+
+        // Submit the search.
         await _adb.PressKeyAsync(AdbController.KEYCODE_ENTER);
         await Task.Delay(_cfg.PageLoadDelayMs);
 
-        bool switchedToUsers = await _adb.TapElementAsync("Shop", partial: false)
-                            || await _adb.TapElementAsync("User", partial: false)
-                            || await _adb.TapElementAsync("Seller", partial: false);
-        if (!switchedToUsers)
+        // Switch to the Shop / User tab so we get profile results, not products.
+        string[] userTabLabels =
+        {
+            "Shop", "Gian hàng", "User", "Người dùng", "Seller", "Người bán"
+        };
+        bool switchedTab = false;
+        foreach (string label in userTabLabels)
+        {
+            switchedTab = await _adb.TapElementAsync(label, partial: false);
+            if (switchedTab)
+            {
+                Console.WriteLine($"[NAV] Switched to '{label}' tab in search results.");
+                break;
+            }
+        }
+        if (!switchedTab)
             Console.WriteLine("[NAV] WARN: Could not switch to User/Shop tab — tapping first result.");
 
         await Task.Delay(800);
 
+        // Tap the result that matches the nickname; fall back to first-result coordinates.
         bool tappedResult = await _adb.TapElementAsync(kolNickname, partial: true);
         if (!tappedResult)
+        {
+            Console.WriteLine("[NAV] Nickname not found in results — tapping first result coordinates.");
             await _adb.TapAsync(coords.FirstSearchResult.X, coords.FirstSearchResult.Y);
+        }
 
         await Task.Delay(_cfg.PageLoadDelayMs);
     }
