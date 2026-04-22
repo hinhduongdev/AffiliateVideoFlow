@@ -1,20 +1,23 @@
 {
-  "adbPath": "adb.exe",
+  "adbPath": "D:\\Tools\\platform-tools-latest-windows\\platform-tools\\adb.exe",
   "deviceSerial": "",
   "shopeePackage": "com.shopee.vn",
   "shopeeDomain": "shopee.vn",
-  "collectorPort": 5050,
-  "mitmproxyPort": 8080,
   "downloadsFolder": "Downloads",
-  "scrollCount": 25,
-  "scrollDelayMs": 2000,
+  "videoCount": 10,
   "appLaunchDelayMs": 3000,
   "pageLoadDelayMs": 2500,
+  "videoLoadDelayMs": 2000,
   "coordinates": {
-    "searchButton":      { "x": 540, "y": 80  },
-    "firstSearchResult": { "x": 540, "y": 350 },
-    "videoTab":          { "x": 540, "y": 280 },
-    "scrollFrom":        { "x": 540, "y": 1600 },
-    "scrollTo":          { "x": 540, "y": 600  }
+    "searchButton":        { "x": 540, "y": 80   },
+    "firstSearchResult":   { "x": 540, "y": 350  },
+    "videoTab":            { "x": 540, "y": 280  },
+    "scrollFrom":          { "x": 540, "y": 1600 },
+    "scrollTo":            { "x": 540, "y": 600  },
+    "firstVideoThumbnail": { "x": 270, "y": 500  },
+    "shareButton":         { "x": 980, "y": 1700 },
+    "copyLinkButton":      { "x": 540, "y": 1500 },
+    "videoSwipeFrom":      { "x": 540, "y": 1400 },
+    "videoSwipeTo":        { "x": 540, "y": 400  }
   }
 }

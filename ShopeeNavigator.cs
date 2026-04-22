@@ -30,12 +30,9 @@ public class ShopeeNavigator
         await _adb.LaunchAppAsync(_cfg.ShopeePackage);
         await Task.Delay(_cfg.AppLaunchDelayMs);
 
-        // Try deep-link shortcut first; fall back to UI search
         bool deepLinkWorked = await TryDeepLinkAsync(kolNickname);
         if (!deepLinkWorked)
-        {
             await SearchForKolAsync(kolNickname);
-        }
 
         await Task.Delay(_cfg.PageLoadDelayMs);
         await NavigateToVideoTabAsync();
@@ -43,35 +40,101 @@ public class ShopeeNavigator
     }
 
     /// <summary>
-    /// Scrolls through the video tab <paramref name="scrollCount"/> times,
-    /// pausing between scrolls to let the network traffic fire.
+    /// Collects Shopee share links for up to <paramref name="videoCount"/> videos
+    /// by tapping each video, pressing Share → Copy Link, reading the clipboard,
+    /// then swiping to the next video.
     /// </summary>
-    public async Task ScrollThroughVideosAsync(int scrollCount, int delayBetweenScrollsMs)
+    /// <returns>List of collected Shopee share URLs.</returns>
+    public async Task<List<string>> CollectVideoShareLinksAsync(int videoCount)
     {
+        var links = new List<string>();
         var coords = _cfg.Coordinates;
-        Console.WriteLine($"[NAV] Scrolling {scrollCount} times to trigger video loads…");
 
-        for (int i = 0; i < scrollCount; i++)
+        Console.WriteLine($"[NAV] Collecting share links for {videoCount} video(s)…");
+
+        // Tap the first video thumbnail to enter the video player
+        Console.WriteLine("[NAV] Tapping first video…");
+        bool tappedFirst = await _adb.TapElementAsync("Video", partial: true);
+        if (!tappedFirst)
+            await _adb.TapAsync(coords.FirstVideoThumbnail.X, coords.FirstVideoThumbnail.Y);
+
+        await Task.Delay(_cfg.VideoLoadDelayMs);
+
+        for (int i = 0; i < videoCount; i++)
         {
-            await _adb.SwipeAsync(
-                coords.ScrollFrom.X, coords.ScrollFrom.Y,
-                coords.ScrollTo.X,   coords.ScrollTo.Y,
-                durationMs: 600);
+            Console.WriteLine($"[NAV] Video {i + 1}/{videoCount} – getting share link…");
 
-            Console.WriteLine($"[NAV] Scroll {i + 1}/{scrollCount}");
-            await Task.Delay(delayBetweenScrollsMs);
+            string? link = await TryCopyShareLinkAsync();
+            if (!string.IsNullOrEmpty(link))
+            {
+                links.Add(link);
+                Console.WriteLine($"[NAV]   ✓ {link}");
+            }
+            else
+            {
+                Console.WriteLine("[NAV]   ✗ Could not get link – skipping.");
+            }
+
+            if (i < videoCount - 1)
+            {
+                // Swipe up to next video in the feed
+                await _adb.SwipeAsync(
+                    coords.VideoSwipeFrom.X, coords.VideoSwipeFrom.Y,
+                    coords.VideoSwipeTo.X,   coords.VideoSwipeTo.Y,
+                    durationMs: 500);
+                await Task.Delay(_cfg.VideoLoadDelayMs);
+            }
         }
+
+        return links;
     }
 
     // ── Private steps ────────────────────────────────────────────────────────
 
     /// <summary>
+    /// While a video is open, taps Share → Copy Link and returns the link
+    /// read from the Android clipboard.
+    /// </summary>
+    private async Task<string?> TryCopyShareLinkAsync()
+    {
+        var coords = _cfg.Coordinates;
+
+        // --- Tap the Share button ---
+        bool tappedShare = await _adb.TapElementAsync("Share", partial: true)
+                        || await _adb.TapElementAsync("Chia sẻ", partial: true);
+        if (!tappedShare)
+        {
+            Console.WriteLine("[NAV]   Share button not found via UIAutomator – using coordinates.");
+            await _adb.TapAsync(coords.ShareButton.X, coords.ShareButton.Y);
+        }
+        await Task.Delay(1200); // wait for share sheet
+
+        // --- Tap Copy Link ---
+        bool tappedCopy = await _adb.TapElementAsync("Copy Link", partial: true)
+                       || await _adb.TapElementAsync("Sao chép liên kết", partial: true)
+                       || await _adb.TapElementAsync("Copy link", partial: true);
+        if (!tappedCopy)
+        {
+            Console.WriteLine("[NAV]   Copy Link not found via UIAutomator – using coordinates.");
+            await _adb.TapAsync(coords.CopyLinkButton.X, coords.CopyLinkButton.Y);
+        }
+        await Task.Delay(800); // let the clipboard write complete
+
+        // --- Read clipboard ---
+        string link = await _adb.GetClipboardAsync();
+
+        // Dismiss the share sheet if still visible (press Back)
+        await _adb.PressKeyAsync(AdbController.KEYCODE_BACK);
+        await Task.Delay(400);
+
+        return string.IsNullOrWhiteSpace(link) ? null : link;
+    }
+
+    /// <summary>
     /// Attempts to jump directly to the KOL's profile via an Android deep link.
-    /// Returns true if the deep link resolved to a profile page.
     /// </summary>
     private async Task<bool> TryDeepLinkAsync(string kolNickname)
     {
-        // Shopee's scheme varies by region. We try the most common patterns.
         string[] deepLinks =
         {
             $"shopee://profile/{Uri.EscapeDataString(kolNickname)}",
@@ -84,7 +147,6 @@ public class ShopeeNavigator
             await _adb.OpenUrlAsync(link);
             await Task.Delay(_cfg.PageLoadDelayMs);
 
-            // Check if we landed on a profile page by looking for "Video" tab
             var center = await _adb.FindElementCenterAsync("Video", partial: true);
             if (center != null)
             {
@@ -105,21 +167,16 @@ public class ShopeeNavigator
         Console.WriteLine("[NAV] Opening search via UI…");
         var coords = _cfg.Coordinates;
 
-        // Tap the search bar (top of Home screen)
         bool tappedSearch = await _adb.TapElementAsync("Search", partial: true);
         if (!tappedSearch)
-        {
             await _adb.TapAsync(coords.SearchButton.X, coords.SearchButton.Y);
-        }
         await Task.Delay(600);
 
-        // Type the KOL nickname
         await _adb.TypeTextAsync(kolNickname);
         await Task.Delay(400);
         await _adb.PressKeyAsync(AdbController.KEYCODE_ENTER);
         await Task.Delay(_cfg.PageLoadDelayMs);
 
-        // Switch to the "Shop" or "User" tab in search results
         bool switchedToUsers = await _adb.TapElementAsync("Shop", partial: false)
                             || await _adb.TapElementAsync("User", partial: false)
                             || await _adb.TapElementAsync("Seller", partial: false);
@@ -128,13 +185,9 @@ public class ShopeeNavigator
 
         await Task.Delay(800);
 
-        // Tap the first result that matches the nickname
         bool tappedResult = await _adb.TapElementAsync(kolNickname, partial: true);
         if (!tappedResult)
-        {
-            // Fallback: tap at configured first-result coordinates
             await _adb.TapAsync(coords.FirstSearchResult.X, coords.FirstSearchResult.Y);
-        }
 
         await Task.Delay(_cfg.PageLoadDelayMs);
     }
@@ -146,7 +199,6 @@ public class ShopeeNavigator
     {
         Console.WriteLine("[NAV] Looking for Video tab…");
 
-        // Try UIAutomator element first (most reliable)
         string[] videoTabLabels = { "Video", "Videos", "Video\n", "คลิป", "视频" };
         foreach (string label in videoTabLabels)
         {
@@ -159,7 +211,6 @@ public class ShopeeNavigator
             }
         }
 
-        // Fallback to configured coordinates
         var coords = _cfg.Coordinates;
         Console.WriteLine("[NAV] WARN: Video tab not found via UIAutomator — using configured coordinates.");
         await _adb.TapAsync(coords.VideoTab.X, coords.VideoTab.Y);

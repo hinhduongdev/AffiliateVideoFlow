@@ -1,27 +1,24 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AffiliateVideoFlow;
 
-// ── Config ───────────────────────────────────────────────────────────────────
+// -- Config ------------------------------------------------------------------
 
 AppConfig cfg = LoadConfig("config.json");
 Directory.CreateDirectory(cfg.DownloadsFolder);
 
-// ── Banner ───────────────────────────────────────────────────────────────────
+// -- Banner ------------------------------------------------------------------
 
 Console.WriteLine("╔══════════════════════════════════════════════════╗");
-Console.WriteLine("║         AffiliateVideoFlow – Shopee Crawler      ║");
+Console.WriteLine("║         AffiliateVideoFlow - Shopee Crawler      ║");
 Console.WriteLine("╚══════════════════════════════════════════════════╝");
 Console.WriteLine();
 
-// ── ADB check ────────────────────────────────────────────────────────────────
+// -- ADB check ---------------------------------------------------------------
 
 var adb = new AdbController(cfg.AdbPath, cfg.DeviceSerial);
 
-Console.WriteLine("[INIT] Checking ADB devices…");
+Console.WriteLine("[INIT] Checking ADB devices...");
 var devices = await adb.GetConnectedDevicesAsync();
 if (devices.Count == 0)
 {
@@ -48,7 +45,7 @@ else if (string.IsNullOrEmpty(cfg.DeviceSerial))
 
 Console.WriteLine($"[INIT] Using device: {cfg.DeviceSerial}");
 
-// ── KOL input ────────────────────────────────────────────────────────────────
+// -- KOL input ---------------------------------------------------------------
 
 Console.Write("\nEnter KOL nickname (Shopee username): ");
 string kolNickname = Console.ReadLine()?.Trim() ?? "";
@@ -58,149 +55,89 @@ if (string.IsNullOrEmpty(kolNickname))
     return 1;
 }
 
-// ── Mitmproxy setup info ──────────────────────────────────────────────────────
+Console.Write("How many videos to download? (default: 10): ");
+string countInput = Console.ReadLine()?.Trim() ?? "";
+int videoCount = int.TryParse(countInput, out int n) && n > 0 ? n : cfg.VideoCount;
 
-Console.WriteLine();
-Console.WriteLine("──────────────────────────────────────────────────────");
-Console.WriteLine("BEFORE CONTINUING – complete these one-time setup steps");
-Console.WriteLine("──────────────────────────────────────────────────────");
-Console.WriteLine($"1. Set your phone's WiFi proxy to:  {GetLocalIp()}:{cfg.MitmproxyPort}");
-Console.WriteLine("2. Open http://mitm.it in the phone browser and install the CA cert.");
-Console.WriteLine("3. Trust the cert in Settings → Security → CA Certificates.");
-Console.WriteLine("──────────────────────────────────────────────────────");
-Console.Write("\nPress ENTER when ready… ");
-Console.ReadLine();
-
-// ── Captured video URLs ───────────────────────────────────────────────────────
-
-var capturedUrls = new ConcurrentBag<string>();
-
-// ── HTTP collector (receives URLs from traffic_sniffer.py) ────────────────────
-
-using var cts = new CancellationTokenSource();
-var collectorTask = RunCollectorAsync(cfg.CollectorPort, capturedUrls, cts.Token);
-
-// ── Start mitmproxy ───────────────────────────────────────────────────────────
-
-Process? mitm = null;
-try
-{
-    Console.WriteLine($"\n[MITM] Starting mitmproxy on port {cfg.MitmproxyPort}…");
-    mitm = StartMitmproxy(cfg);
-    await Task.Delay(1500); // let it initialise
-}
-catch (Exception ex)
-{
-    Console.ForegroundColor = ConsoleColor.Yellow;
-    Console.WriteLine($"[MITM] Could not auto-start mitmproxy: {ex.Message}");
-    Console.WriteLine("       Please start it manually:");
-    Console.WriteLine($"       mitmdump -p {cfg.MitmproxyPort} -s traffic_sniffer.py --set collector_port={cfg.CollectorPort}");
-    Console.ResetColor();
-}
-
-// ── Navigate + scroll ─────────────────────────────────────────────────────────
+// -- Navigate to KOL video tab -----------------------------------------------
 
 var navigator = new ShopeeNavigator(new AdbController(cfg.AdbPath, cfg.DeviceSerial), cfg);
 await navigator.NavigateToKolVideosAsync(kolNickname);
-await navigator.ScrollThroughVideosAsync(cfg.ScrollCount, cfg.ScrollDelayMs);
 
-// ── Give the sniffer a moment to flush remaining URLs ─────────────────────────
+// -- Collect Shopee share links via ADB Share -> Copy Link -------------------
 
-Console.WriteLine("\n[INFO] Waiting 3 s for last URLs to arrive…");
-await Task.Delay(3000);
+Console.WriteLine("\n[STEP 1] Collecting Shopee share links via ADB...");
+List<string> shopeeLinks = await navigator.CollectVideoShareLinksAsync(videoCount);
 
-// ── Shut down mitmproxy ───────────────────────────────────────────────────────
-
-cts.Cancel();
-mitm?.Kill(entireProcessTree: true);
-
-// ── Download ──────────────────────────────────────────────────────────────────
-
-var allUrls = capturedUrls.Distinct().ToList();
-Console.WriteLine($"\n[INFO] Captured {allUrls.Count} unique video URL(s).");
-
-if (allUrls.Count == 0)
+Console.WriteLine($"\n[INFO] Collected {shopeeLinks.Count} share link(s).");
+if (shopeeLinks.Count == 0)
 {
     Console.ForegroundColor = ConsoleColor.Yellow;
-    Console.WriteLine("[WARN] No URLs captured. Check:");
-    Console.WriteLine("       • Proxy is set correctly on the phone.");
-    Console.WriteLine("       • mitmproxy CA cert is installed and trusted.");
-    Console.WriteLine("       • The phone actually loaded videos while scrolling.");
+    Console.WriteLine("[WARN] No links collected. Check:");
+    Console.WriteLine("       - The KOL profile has videos.");
+    Console.WriteLine("       - The Share / Copy Link buttons are at the configured coordinates.");
+    Console.WriteLine("       - UIAutomator can detect the buttons (try adjusting coordinates in config.json).");
     Console.ResetColor();
-}
-else
-{
-    var downloader = new VideoDownloader(cfg);
-    await downloader.DownloadAllAsync(allUrls, kolNickname);
-    Console.WriteLine($"\n[DONE] {downloader.TotalDownloaded} video(s) saved to {cfg.DownloadsFolder}/{kolNickname}/");
+    return 1;
 }
 
+// -- Extract direct MP4 URLs via Playwright ----------------------------------
+
+Console.WriteLine("\n[STEP 2] Extracting direct MP4 URLs via browser (downloadvideo.vn)...");
+await using var extractor = new ShopeeVideoLinkExtractor();
+await extractor.InitAsync(headless: true);
+
+var mp4Urls = new List<string>();
+for (int i = 0; i < shopeeLinks.Count; i++)
+{
+    string shareLink = shopeeLinks[i];
+    Console.Write($"  [{i + 1}/{shopeeLinks.Count}] {shareLink} => ");
+
+    string? mp4 = await extractor.GetMp4UrlAsync(shareLink);
+    if (!string.IsNullOrEmpty(mp4))
+    {
+        mp4Urls.Add(mp4);
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine("OK");
+        Console.ResetColor();
+    }
+    else
+    {
+        Console.ForegroundColor = ConsoleColor.Yellow;
+        Console.WriteLine("FAIL (skipped)");
+        Console.ResetColor();
+    }
+}
+
+// -- Download MP4 files ------------------------------------------------------
+
+Console.WriteLine($"\n[STEP 3] Downloading {mp4Urls.Count} MP4 file(s)...");
+if (mp4Urls.Count == 0)
+{
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine("[WARN] No MP4 URLs extracted. The downloader site layout may have changed.");
+    Console.ResetColor();
+    return 1;
+}
+
+var downloader = new VideoDownloader(cfg);
+await downloader.DownloadAllAsync(mp4Urls, kolNickname);
+
+Console.WriteLine();
+Console.ForegroundColor = ConsoleColor.Green;
+Console.WriteLine($"[DONE] {downloader.TotalDownloaded} video(s) saved to {cfg.DownloadsFolder}/{kolNickname}/");
+Console.ResetColor();
 return 0;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
 // Local functions
-// ─────────────────────────────────────────────────────────────────────────────
-
-static async Task RunCollectorAsync(
-    int port,
-    ConcurrentBag<string> bag,
-    CancellationToken ct)
-{
-    var listener = new HttpListener();
-    listener.Prefixes.Add($"http://localhost:{port}/");
-    listener.Start();
-    Console.WriteLine($"[COLLECTOR] Listening on http://localhost:{port}/");
-
-    while (!ct.IsCancellationRequested)
-    {
-        HttpListenerContext? ctx = null;
-        try
-        {
-            ctx = await listener.GetContextAsync().WaitAsync(ct);
-        }
-        catch (OperationCanceledException) { break; }
-        catch { break; }
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                using var reader = new System.IO.StreamReader(ctx.Request.InputStream);
-                string body = await reader.ReadToEndAsync();
-                var msg = JsonSerializer.Deserialize<VideoUrlMessage>(body);
-                if (!string.IsNullOrWhiteSpace(msg?.Url))
-                {
-                    bag.Add(msg.Url);
-                    Console.WriteLine($"[COLLECTOR] + {msg.Url}");
-                }
-                ctx.Response.StatusCode = 200;
-                ctx.Response.Close();
-            }
-            catch { /* ignore malformed requests */ }
-        }, ct);
-    }
-
-    listener.Stop();
-}
-
-static Process StartMitmproxy(AppConfig cfg)
-{
-    var psi = new ProcessStartInfo
-    {
-        FileName  = "mitmdump",
-        Arguments = $"-p {cfg.MitmproxyPort} -s traffic_sniffer.py " +
-                    $"--set collector_port={cfg.CollectorPort}",
-        UseShellExecute = false,
-        CreateNoWindow  = false  // keep visible so user can see captured URLs
-    };
-    return Process.Start(psi) ?? throw new InvalidOperationException("mitmdump failed to start.");
-}
+// ---------------------------------------------------------------------------
 
 static AppConfig LoadConfig(string path)
 {
     if (!File.Exists(path))
     {
-        Console.WriteLine($"[CONFIG] {path} not found – using defaults.");
+        Console.WriteLine($"[CONFIG] {path} not found - using defaults.");
         return AppConfig.Default;
     }
     string json = File.ReadAllText(path);
@@ -210,21 +147,7 @@ static AppConfig LoadConfig(string path)
     }) ?? AppConfig.Default;
 }
 
-static string GetLocalIp()
-{
-    try
-    {
-        using var socket = new System.Net.Sockets.UdpClient("8.8.8.8", 53);
-        return ((System.Net.IPEndPoint)socket.Client.LocalEndPoint!).Address.ToString();
-    }
-    catch { return "YOUR-PC-IP"; }
-}
-
-// ── DTOs ──────────────────────────────────────────────────────────────────────
-
-record VideoUrlMessage([property: JsonPropertyName("url")] string? Url);
-
-// ── Config model ──────────────────────────────────────────────────────────────
+// -- Config model ------------------------------------------------------------
 
 public record Coordinate(int X, int Y);
 
@@ -233,40 +156,46 @@ public record CoordinateMap(
     Coordinate FirstSearchResult,
     Coordinate VideoTab,
     Coordinate ScrollFrom,
-    Coordinate ScrollTo);
+    Coordinate ScrollTo,
+    Coordinate FirstVideoThumbnail,
+    Coordinate ShareButton,
+    Coordinate CopyLinkButton,
+    Coordinate VideoSwipeFrom,
+    Coordinate VideoSwipeTo);
 
 public record AppConfig(
-    string AdbPath,
-    string DeviceSerial,
-    string ShopeePackage,
-    string ShopeeDomain,
-    int    CollectorPort,
-    int    MitmproxyPort,
-    string DownloadsFolder,
-    int    ScrollCount,
-    int    ScrollDelayMs,
-    int    AppLaunchDelayMs,
-    int    PageLoadDelayMs,
+    string        AdbPath,
+    string        DeviceSerial,
+    string        ShopeePackage,
+    string        ShopeeDomain,
+    string        DownloadsFolder,
+    int           VideoCount,
+    int           AppLaunchDelayMs,
+    int           PageLoadDelayMs,
+    int           VideoLoadDelayMs,
     CoordinateMap Coordinates)
 {
     public static AppConfig Default => new(
-        AdbPath:         "adb.exe",
-        DeviceSerial:    "",
-        ShopeePackage:   "com.shopee.vn",
-        ShopeeDomain:    "shopee.vn",
-        CollectorPort:   5050,
-        MitmproxyPort:   8080,
-        DownloadsFolder: "Downloads",
-        ScrollCount:     25,
-        ScrollDelayMs:   2000,
-        AppLaunchDelayMs:3000,
-        PageLoadDelayMs: 2500,
+        AdbPath: "D:\\Tools\\platform-tools-latest-windows\\platform-tools\\adb.exe",
+        DeviceSerial:     "",
+        ShopeePackage:    "com.shopee.vn",
+        ShopeeDomain:     "shopee.vn",
+        DownloadsFolder:  "Downloads",
+        VideoCount:       10,
+        AppLaunchDelayMs: 3000,
+        PageLoadDelayMs:  2500,
+        VideoLoadDelayMs: 2000,
         Coordinates: new CoordinateMap(
-            SearchButton:      new Coordinate(540, 80),
-            FirstSearchResult: new Coordinate(540, 350),
-            VideoTab:          new Coordinate(540, 280),
-            ScrollFrom:        new Coordinate(540, 1600),
-            ScrollTo:          new Coordinate(540, 600)
+            SearchButton:        new Coordinate(540,  80),
+            FirstSearchResult:   new Coordinate(540, 350),
+            VideoTab:            new Coordinate(540, 280),
+            ScrollFrom:          new Coordinate(540, 1600),
+            ScrollTo:            new Coordinate(540,  600),
+            FirstVideoThumbnail: new Coordinate(270,  500),
+            ShareButton:         new Coordinate(980, 1700),
+            CopyLinkButton:      new Coordinate(540, 1500),
+            VideoSwipeFrom:      new Coordinate(540, 1400),
+            VideoSwipeTo:        new Coordinate(540,  400)
         )
     );
 }

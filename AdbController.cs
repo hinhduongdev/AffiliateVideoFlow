@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 
 namespace AffiliateVideoFlow;
@@ -200,18 +202,69 @@ public class AdbController
         return true;
     }
 
-    // ── Proxy helpers ────────────────────────────────────────────────────────
+    // ── Clipboard ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Sets the WiFi proxy on the device to redirect traffic through mitmproxy.
-    /// Requires the phone's WiFi SSID to be known (or use ADB shell settings).
-    /// Note: This works for Android 10+ via the global proxy setting (root or
-    /// test-only builds). For non-rooted devices, instruct the user to set
-    /// the proxy manually in WiFi settings.
+    /// Reads the current Android clipboard text via the ADB shell clipboard
+    /// service call. Works on Android 7–14 without root or extra apps.
+    /// Returns an empty string if the clipboard is empty or cannot be read.
     /// </summary>
-    public Task SetGlobalProxyAsync(string host, int port) =>
-        RunAsync($"shell settings put global http_proxy {host}:{port}");
+    public async Task<string> GetClipboardAsync()
+    {
+        // service call clipboard 2 = IClipboard.getPrimaryClip(packageName, uid)
+        string raw = await RunAsync("shell service call clipboard 2 i32 1 i32 0 i32 0");
+        if (string.IsNullOrWhiteSpace(raw))
+            return "";
 
-    public Task ClearGlobalProxyAsync() =>
-        RunAsync("shell settings put global http_proxy :0");
+        string result = ExtractUrlFromParcel(raw);
+        if (!string.IsNullOrEmpty(result))
+            return result;
+
+        // Fallback: try to read plaintext via content provider (some ROMs support it)
+        string raw2 = await RunAsync("shell content query --uri content://clipboard");
+        return ExtractUrlFromText(raw2);
+    }
+
+    /// <summary>
+    /// Parses the hex parcel dump from <c>service call clipboard</c> and
+    /// extracts any http/https URL encoded as UTF-16 (BE or LE).
+    /// </summary>
+    private static string ExtractUrlFromParcel(string parcelOutput)
+    {
+        // Each word in the dump is 8 hex digits = 4 bytes, printed high-byte first.
+        var bytes = new List<byte>();
+        foreach (Match m in Regex.Matches(parcelOutput, @"\b[0-9A-Fa-f]{8}\b"))
+        {
+            string h = m.Value;
+            bytes.Add(Convert.ToByte(h[0..2], 16));
+            bytes.Add(Convert.ToByte(h[2..4], 16));
+            bytes.Add(Convert.ToByte(h[4..6], 16));
+            bytes.Add(Convert.ToByte(h[6..8], 16));
+        }
+
+        if (bytes.Count < 12) return "";
+        byte[] arr = bytes.ToArray();
+
+        // Try UTF-16 big-endian first (most common in Android parcel hexdumps)
+        foreach (var enc in new[] { Encoding.BigEndianUnicode, Encoding.Unicode })
+        {
+            try
+            {
+                string text = enc.GetString(arr);
+                var m = Regex.Match(text, @"https?://[^\s\x00]{10,}");
+                if (m.Success)
+                    return m.Value.TrimEnd('\0', ' ', '\r', '\n');
+            }
+            catch { /* try next encoding */ }
+        }
+
+        return "";
+    }
+
+    private static string ExtractUrlFromText(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var m = Regex.Match(raw, @"https?://\S{10,}");
+        return m.Success ? m.Value.TrimEnd('\0', ' ') : "";
+    }
 }
